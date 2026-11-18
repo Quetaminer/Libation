@@ -95,11 +95,16 @@ The command:
 - Checks the server before each upload and skips titles already present - see [Duplicate handling](#duplicate-handling).
 - Prints a summary at the end: uploaded, already on server, no files found, failed, skipped. `skipped` counts books you named by ASIN that were not eligible - most often because they are not marked as liberated.
 
-Libation does not record which books it has already uploaded, so every run re-checks each candidate against the server. That costs a couple of search requests per book, which is noticeable on a large library but makes repeat runs safe to retry.
+Libation does not record which books it has already uploaded, so every run re-checks each candidate against the server. That costs one search request for a book the server already has under its ASIN, and up to three for a book it does not have, which is noticeable on a large library but makes repeat runs safe to retry.
 
 ## Duplicate handling
 
-Before uploading, Libation searches the target Audiobookshelf library for an existing item with a matching title (and author when available). If a match is found, or Audiobookshelf reports that the destination already exists, Libation skips the upload and continues.
+Before uploading, Libation searches the target Audiobookshelf library for the book and skips the upload if it is already there. For each item the search returns, it decides in this order:
+
+1. **ASIN.** An item with the book's Audible ASIN is the same book, whatever its title on the server. An item with a different ASIN is a different book, even with the same title and author: it is another edition or narration, and Libation uploads yours. Audiobookshelf reads the ASIN from the audio file's tags, which Libation writes, or from an `[ASIN]` in the book's folder name. An ASIN that appears only in a file name is not picked up by Audiobookshelf and is not matched.
+2. **Title and author**, when the server item has no ASIN. The server's title must equal Libation's title, with or without its subtitle, and one author must be the same. Case, accents, punctuation and spacing are ignored, so `R.A. Salvatore` matches `R. A. Salvatore`. A qualifier in brackets at the end of one of the two titles, such as `(Spirit Animals, Book 1)` or `(French Edition)`, is ignored too.
+
+If Audiobookshelf reports that the destination already exists, Libation also skips the upload and continues.
 
 ## Failures do not fail liberation
 

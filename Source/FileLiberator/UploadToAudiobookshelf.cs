@@ -81,7 +81,8 @@ public class UploadToAudiobookshelf : Processable, IProcessable<UploadToAudioboo
 				title,
 				author,
 				series,
-				files);
+				files,
+				libraryBook.Book.AudibleProductId);
 
 			if (result == AudiobookshelfApiService.UploadResult.Success)
 			{

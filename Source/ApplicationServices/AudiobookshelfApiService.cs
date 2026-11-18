@@ -7,6 +7,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Text;
 using System.Threading.Tasks;
 
 namespace ApplicationServices;
@@ -297,7 +298,17 @@ public static class AudiobookshelfApiService
 		}
 	}
 
-	public static async Task<bool> BookExistsAsync(string serverUrl, string apiToken, string libraryId, string title, string? author = null)
+	/// <summary>
+	/// Whether the library already holds this book.
+	/// <para/>
+	/// Candidates come from Audiobookshelf's library search, which finds its query as a substring of an
+	/// item's title, subtitle, ASIN or ISBN. The search is asked for the ASIN, then for the title with and
+	/// without its subtitle. <see cref="ClassifyCandidate"/> decides whether a candidate is the same book.
+	/// <para/>
+	/// Audiobookshelf fills an item's ASIN from the audio file's tags or from an <c>[ASIN]</c> in the folder
+	/// name. An ASIN that appears only in a file name is not in the item's metadata and is not matched as one.
+	/// </summary>
+	public static async Task<bool> BookExistsAsync(string serverUrl, string apiToken, string libraryId, string title, string? author = null, string? asin = null)
 	{
 		apiToken = AudiobookshelfTokenStorage.DecryptToken(apiToken) ?? "";
 		using var client = CreateClient(serverUrl);
@@ -309,58 +320,46 @@ public static class AudiobookshelfApiService
 
 		Serilog.Log.Logger.Debug("Audiobookshelf duplicate check: looking for '{Title}' (base: '{BaseTitle}') in library {LibraryId}", normalizedTitle, baseTitle, libraryId);
 
-		try
+		var seen = new HashSet<string>(StringComparer.Ordinal);
+
+		// Runs one search and reports whether any item it has not looked at before is this book.
+		async Task<bool> SearchFindsBookAsync(string query, int limit)
 		{
-			// Search with base title first (shorter = broader fuzzy matches, better recall)
-			var candidates = await SearchLibraryAsync(client, libraryId, baseTitle, 20);
-
-			// Also search with full title to catch cases where ABS stores the longer/subtitled version
-			if (!string.Equals(normalizedTitle, baseTitle, StringComparison.Ordinal))
+			foreach (var candidate in await SearchLibraryAsync(client, libraryId, query, limit))
 			{
-				var fullCandidates = await SearchLibraryAsync(client, libraryId, normalizedTitle, 10);
-				foreach (var c in fullCandidates)
-				{
-					if (!candidates.Any(existing => string.Equals(existing.Id, c.Id, StringComparison.Ordinal)))
-						candidates.Add(c);
-				}
-			}
-
-			if (candidates.Count == 0)
-			{
-				Serilog.Log.Logger.Debug("Audiobookshelf duplicate check: no candidates found for '{Title}' in library {LibraryId}", normalizedTitle, libraryId);
-				return false;
-			}
-
-			Serilog.Log.Logger.Debug("Audiobookshelf duplicate check: found {Count} candidate(s) for '{Title}' in library {LibraryId}", candidates.Count, normalizedTitle, libraryId);
-
-			foreach (var candidate in candidates)
-			{
-				if (string.IsNullOrWhiteSpace(candidate.Title))
+				if (!seen.Add(candidate.Id))
 					continue;
 
-				bool titleMatch = false;
+				var match = ClassifyCandidate(
+					normalizedTitle, author, asin,
+					candidate.Title, candidate.FullTitle, candidate.Authors, candidate.Asin);
 
-				// 1) Exact match against normalized title
-				if (string.Equals(candidate.Title, normalizedTitle, StringComparison.OrdinalIgnoreCase))
-					titleMatch = true;
-
-				// 2) Exact match against base title (without subtitle)
-				if (!titleMatch && string.Equals(candidate.Title, baseTitle, StringComparison.OrdinalIgnoreCase))
-					titleMatch = true;
-
-				// 3) Exact match against combined title:subtitle
-				if (!titleMatch && !string.IsNullOrWhiteSpace(candidate.FullTitle)
-					&& string.Equals(candidate.FullTitle, normalizedTitle, StringComparison.OrdinalIgnoreCase))
-					titleMatch = true;
-
-				if (titleMatch && AuthorsCompatible(author, candidate.Authors))
+				if (match != DuplicateMatch.None)
 				{
-					Serilog.Log.Logger.Information("Audiobookshelf duplicate check: found match for '{Title}' (id={ItemId})", title, candidate.Id);
+					Serilog.Log.Logger.Information("Audiobookshelf duplicate check: found match for '{Title}' by {MatchedBy}: '{CandidateTitle}' (id={ItemId})", title, match, candidate.Title, candidate.Id);
 					return true;
 				}
-			}
 
-			Serilog.Log.Logger.Debug("Audiobookshelf duplicate check: '{Title}' not found in library {LibraryId}", normalizedTitle, libraryId);
+				Serilog.Log.Logger.Debug("Audiobookshelf duplicate check: '{CandidateTitle}' (id={ItemId}) is not '{Title}'", candidate.Title, candidate.Id, normalizedTitle);
+			}
+			return false;
+		}
+
+		try
+		{
+			// The ASIN identifies the book whatever the server calls it, so try it before the title.
+			if (!string.IsNullOrWhiteSpace(asin) && await SearchFindsBookAsync(asin.Trim(), 10))
+				return true;
+
+			// Search with base title first (shorter = broader matches, better recall)
+			if (await SearchFindsBookAsync(baseTitle, 20))
+				return true;
+
+			// Also search with full title to catch cases where ABS stores the longer/subtitled version
+			if (!string.Equals(normalizedTitle, baseTitle, StringComparison.Ordinal) && await SearchFindsBookAsync(normalizedTitle, 10))
+				return true;
+
+			Serilog.Log.Logger.Debug("Audiobookshelf duplicate check: '{Title}' not found among {Count} candidate(s) in library {LibraryId}", normalizedTitle, seen.Count, libraryId);
 			return false;
 		}
 		catch (Exception ex)
@@ -370,7 +369,7 @@ public static class AudiobookshelfApiService
 		}
 	}
 
-	private record SearchCandidate(string Id, string Title, string FullTitle, List<string> Authors);
+	private record SearchCandidate(string Id, string Title, string FullTitle, List<string> Authors, string? Asin);
 
 	private static async Task<List<SearchCandidate>> SearchLibraryAsync(HttpClient client, string libraryId, string query, int limit)
 	{
@@ -407,13 +406,146 @@ public static class AudiobookshelfApiService
 				id,
 				NormalizeTitle(itemTitle),
 				NormalizeTitle(itemFullTitle),
-				authorList));
+				authorList,
+				item["media"]?["metadata"]?["asin"]?.Value<string>()));
 		}
 
 		return results;
 	}
 
-	private static bool AuthorsCompatible(string? libationAuthor, List<string> absAuthors)
+	/// <summary>What identified a server item as the book being uploaded.</summary>
+	internal enum DuplicateMatch
+	{
+		None,
+		/// <summary>Same ASIN.</summary>
+		Asin,
+		/// <summary>Same title and an author in common.</summary>
+		TitleAndAuthor,
+	}
+
+	/// <summary>
+	/// Decides whether a server item is the book being uploaded.
+	/// <para/>
+	/// 1) ASIN. The same ASIN is the same book whatever else differs. Two different ASINs are two different
+	/// books whatever else agrees: the same title and author under another ASIN is another edition or narration.
+	/// <para/>
+	/// 2) Title and author, when either side has no ASIN. The same title with an author in common is the
+	/// same book. See <see cref="TitlesMatch"/> and <see cref="AuthorsCompatible"/>.
+	/// </summary>
+	internal static DuplicateMatch ClassifyCandidate(
+		string? libationTitle,
+		string? libationAuthor,
+		string? libationAsin,
+		string? absTitle,
+		string? absFullTitle,
+		IReadOnlyList<string>? absAuthors,
+		string? absAsin)
+	{
+		if (AsinsMatch(libationAsin, absAsin))
+			return DuplicateMatch.Asin;
+		if (AsinsDiffer(libationAsin, absAsin))
+			return DuplicateMatch.None;
+
+		return TitlesMatch(libationTitle, absTitle, absFullTitle) && AuthorsCompatible(libationAuthor, absAuthors)
+			? DuplicateMatch.TitleAndAuthor
+			: DuplicateMatch.None;
+	}
+
+	internal static bool AsinsMatch(string? libationAsin, string? absAsin)
+		=> !string.IsNullOrWhiteSpace(libationAsin)
+		&& !string.IsNullOrWhiteSpace(absAsin)
+		&& string.Equals(libationAsin.Trim(), absAsin.Trim(), StringComparison.OrdinalIgnoreCase);
+
+	/// <summary>Both sides have an ASIN and they are not the same one.</summary>
+	internal static bool AsinsDiffer(string? libationAsin, string? absAsin)
+		=> !string.IsNullOrWhiteSpace(libationAsin)
+		&& !string.IsNullOrWhiteSpace(absAsin)
+		&& !AsinsMatch(libationAsin, absAsin);
+
+	/// <summary>
+	/// Whether an Audiobookshelf title is the same book as Libation's "Title: Subtitle".
+	/// <para/>
+	/// The server's title matches when it equals Libation's full title or the part before the subtitle,
+	/// or when the server's "title: subtitle" equals Libation's full title. Case, accents, punctuation
+	/// and spacing are ignored.
+	/// <para/>
+	/// A trailing qualifier in brackets, such as "(Spirit Animals, Book 1)", is ignored when only one side
+	/// has one. Two titles that each carry a different qualifier stay different books.
+	/// </summary>
+	/// <param name="libationTitle">Libation's title, with its subtitle if it has one.</param>
+	/// <param name="absTitle">The server's title.</param>
+	/// <param name="absFullTitle">The server's "title: subtitle", or its title when it has no subtitle.</param>
+	internal static bool TitlesMatch(string? libationTitle, string? absTitle, string? absFullTitle)
+	{
+		var full = NormalizeTitle(libationTitle);
+		var title = NormalizeTitle(absTitle);
+		if (string.IsNullOrWhiteSpace(full) || string.IsNullOrWhiteSpace(title))
+			return false;
+
+		var baseTitle = GetBaseTitle(full);
+
+		return SameTitle(title, full)
+			|| SameTitle(title, baseTitle)
+			|| SameTitle(NormalizeTitle(absFullTitle), full);
+	}
+
+	private static bool SameTitle(string absTitle, string libationTitle)
+	{
+		var absKey = ComparisonKey(absTitle);
+		var libationKey = ComparisonKey(libationTitle);
+		if (absKey.Length == 0 || libationKey.Length == 0)
+			return false;
+		if (absKey == libationKey)
+			return true;
+
+		var absStripped = StripTrailingQualifiers(absTitle);
+		var libationStripped = StripTrailingQualifiers(libationTitle);
+
+		// Only one side may have had a qualifier. "Title (Book 1)" and "Title (Book 2)" are different books.
+		if (absStripped.Length != absTitle.Length && libationStripped.Length != libationTitle.Length)
+			return false;
+
+		var absStrippedKey = ComparisonKey(absStripped);
+		return absStrippedKey.Length > 0 && absStrippedKey == ComparisonKey(libationStripped);
+	}
+
+	/// <summary>Removes bracketed groups from the end of a title: "Wild Born (Spirit Animals, Book 1)" becomes "Wild Born".</summary>
+	private static string StripTrailingQualifiers(string title)
+	{
+		var result = title.TrimEnd();
+		while (result.Length > 0 && result[^1] is ')' or ']')
+		{
+			var open = result.LastIndexOf(result[^1] == ')' ? '(' : '[');
+			if (open <= 0)
+				break;
+			result = result[..open].TrimEnd();
+		}
+		return result;
+	}
+
+	/// <summary>
+	/// Reduces a title or name to its letters and digits, lower-cased and without accents, so that
+	/// "R.A. Salvatore" and "R. A. Salvatore" compare equal. "&amp;" counts as "and".
+	/// </summary>
+	private static string ComparisonKey(string? value)
+	{
+		if (string.IsNullOrWhiteSpace(value))
+			return "";
+
+		var sb = new StringBuilder(value.Length);
+		foreach (var c in value.Replace("&", " and ").Normalize(NormalizationForm.FormKD))
+		{
+			if (char.IsLetterOrDigit(c))
+				sb.Append(char.ToLowerInvariant(c));
+		}
+		return sb.ToString();
+	}
+
+	/// <summary>
+	/// Whether any author on the server is one of Libation's authors. Case, accents, punctuation and
+	/// spacing are ignored, so the spacing of initials does not matter.
+	/// </summary>
+	internal static bool AuthorsCompatible(string? libationAuthor, IReadOnlyList<string>? absAuthors)
 	{
 		// If either side has no author info, we can't use authors to disambiguate
 		if (string.IsNullOrWhiteSpace(libationAuthor))
@@ -422,30 +554,14 @@ public static class AudiobookshelfApiService
 			return true;
 
 		var libationAuthors = libationAuthor.Split(',', StringSplitOptions.RemoveEmptyEntries)
-			.Select(a => NormalizeAuthor(a))
-			.Where(a => !string.IsNullOrWhiteSpace(a))
-			.ToList();
+			.Select(ComparisonKey)
+			.Where(a => a.Length > 0)
+			.ToHashSet(StringComparer.Ordinal);
 
 		if (libationAuthors.Count == 0)
 			return true;
 
-		foreach (var absAuthor in absAuthors.Select(NormalizeAuthor))
-		{
-			foreach (var la in libationAuthors)
-			{
-				if (string.Equals(absAuthor, la, StringComparison.OrdinalIgnoreCase))
-					return true;
-			}
-		}
-
-		return false;
-	}
-
-	private static string NormalizeAuthor(string? author)
-	{
-		if (string.IsNullOrWhiteSpace(author))
-			return author ?? "";
-		return author.Replace("\u00A0", " ").Trim();
+		return absAuthors.Select(ComparisonKey).Any(libationAuthors.Contains);
 	}
 
 	private static string NormalizeTitle(string? title)
@@ -483,14 +599,15 @@ public static class AudiobookshelfApiService
 		string title,
 		string? author,
 		string? series,
-		IEnumerable<string> filePaths)
+		IEnumerable<string> filePaths,
+		string? asin = null)
 	{
 		apiToken = AudiobookshelfTokenStorage.DecryptToken(apiToken) ?? "";
 
 		// Pre-check for existing item
 		try
 		{
-			if (await BookExistsAsync(serverUrl, apiToken, libraryId, title, author))
+			if (await BookExistsAsync(serverUrl, apiToken, libraryId, title, author, asin))
 			{
 				Serilog.Log.Logger.Information("Skipping Audiobookshelf upload: book '{Title}' already exists in library {LibraryId}", title, libraryId);
 				return UploadResult.AlreadyExists;
