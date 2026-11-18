@@ -303,12 +303,13 @@ public static class AudiobookshelfApiService
 	/// <para/>
 	/// Candidates come from Audiobookshelf's library search, which finds its query as a substring of an
 	/// item's title, subtitle, ASIN or ISBN. The search is asked for the ASIN, then for the title with and
-	/// without its subtitle. <see cref="ClassifyCandidate"/> decides whether a candidate is the same book.
+	/// without its subtitle, and last for the title's longest words, which still finds an item whose title
+	/// has a typo elsewhere. <see cref="ClassifyCandidate"/> decides whether a candidate is the same book.
 	/// <para/>
 	/// Audiobookshelf fills an item's ASIN from the audio file's tags or from an <c>[ASIN]</c> in the folder
 	/// name. An ASIN that appears only in a file name is not in the item's metadata and is not matched as one.
 	/// </summary>
-	public static async Task<bool> BookExistsAsync(string serverUrl, string apiToken, string libraryId, string title, string? author = null, string? asin = null)
+	public static async Task<bool> BookExistsAsync(string serverUrl, string apiToken, string libraryId, string title, string? author = null, string? asin = null, int? lengthInMinutes = null)
 	{
 		apiToken = AudiobookshelfTokenStorage.DecryptToken(apiToken) ?? "";
 		using var client = CreateClient(serverUrl);
@@ -331,8 +332,8 @@ public static class AudiobookshelfApiService
 					continue;
 
 				var match = ClassifyCandidate(
-					normalizedTitle, author, asin,
-					candidate.Title, candidate.FullTitle, candidate.Authors, candidate.Asin);
+					normalizedTitle, author, asin, lengthInMinutes,
+					candidate.Title, candidate.FullTitle, candidate.Authors, candidate.Asin, candidate.DurationSeconds);
 
 				if (match != DuplicateMatch.None)
 				{
@@ -359,6 +360,16 @@ public static class AudiobookshelfApiService
 			if (!string.Equals(normalizedTitle, baseTitle, StringComparison.Ordinal) && await SearchFindsBookAsync(normalizedTitle, 10))
 				return true;
 
+			// A misspelled title is only accepted when the lengths agree, so without a length there is nothing more to find.
+			if (lengthInMinutes is > 0)
+			{
+				foreach (var word in GetDistinctiveWords(baseTitle))
+				{
+					if (await SearchFindsBookAsync(word, 25))
+						return true;
+				}
+			}
+
 			Serilog.Log.Logger.Debug("Audiobookshelf duplicate check: '{Title}' not found among {Count} candidate(s) in library {LibraryId}", normalizedTitle, seen.Count, libraryId);
 			return false;
 		}
@@ -369,7 +380,7 @@ public static class AudiobookshelfApiService
 		}
 	}
 
-	private record SearchCandidate(string Id, string Title, string FullTitle, List<string> Authors, string? Asin);
+	private record SearchCandidate(string Id, string Title, string FullTitle, List<string> Authors, string? Asin, double? DurationSeconds);
 
 	private static async Task<List<SearchCandidate>> SearchLibraryAsync(HttpClient client, string libraryId, string query, int limit)
 	{
@@ -407,11 +418,15 @@ public static class AudiobookshelfApiService
 				NormalizeTitle(itemTitle),
 				NormalizeTitle(itemFullTitle),
 				authorList,
-				item["media"]?["metadata"]?["asin"]?.Value<string>()));
+				item["media"]?["metadata"]?["asin"]?.Value<string>(),
+				ReadDuration(item["media"]?["duration"])));
 		}
 
 		return results;
 	}
+
+	private static double? ReadDuration(JToken? duration)
+		=> duration?.Type is JTokenType.Float or JTokenType.Integer ? duration.Value<double>() : null;
 
 	/// <summary>What identified a server item as the book being uploaded.</summary>
 	internal enum DuplicateMatch
@@ -421,34 +436,94 @@ public static class AudiobookshelfApiService
 		Asin,
 		/// <summary>Same title and an author in common.</summary>
 		TitleAndAuthor,
+		/// <summary>Same title and length; the server's authors are different or misspelled.</summary>
+		TitleAndLength,
+		/// <summary>Same length, with a title and author that differ by a few characters.</summary>
+		SimilarTitleAndLength,
 	}
 
 	/// <summary>
-	/// Decides whether a server item is the book being uploaded.
+	/// Decides whether a server item is the book being uploaded. The evidence, strongest first:
 	/// <para/>
 	/// 1) ASIN. The same ASIN is the same book whatever else differs. Two different ASINs are two different
 	/// books whatever else agrees: the same title and author under another ASIN is another edition or narration.
 	/// <para/>
-	/// 2) Title and author, when either side has no ASIN. The same title with an author in common is the
-	/// same book. See <see cref="TitlesMatch"/> and <see cref="AuthorsCompatible"/>.
+	/// 2) Length. Without an ASIN to settle it, a clearly different length also means another edition
+	/// (abridged, another narrator) or an incomplete copy, and the book is uploaded.
+	/// <para/>
+	/// 3) Title and author. The same title with an author in common is the same book. See
+	/// <see cref="TitlesMatch"/> and <see cref="AuthorsCompatible"/>.
+	/// <para/>
+	/// 4) Title, author and length together. When the lengths agree, the author may differ if the title is the
+	/// same, and both may be off by a few characters. See <see cref="TitleSimilarity"/> and
+	/// <see cref="AuthorsSimilar"/>. Without a matching length, a near miss stays a different book.
 	/// </summary>
 	internal static DuplicateMatch ClassifyCandidate(
 		string? libationTitle,
 		string? libationAuthor,
 		string? libationAsin,
+		int? libationLengthInMinutes,
 		string? absTitle,
 		string? absFullTitle,
 		IReadOnlyList<string>? absAuthors,
-		string? absAsin)
+		string? absAsin,
+		double? absDurationSeconds)
 	{
 		if (AsinsMatch(libationAsin, absAsin))
 			return DuplicateMatch.Asin;
 		if (AsinsDiffer(libationAsin, absAsin))
 			return DuplicateMatch.None;
 
-		return TitlesMatch(libationTitle, absTitle, absFullTitle) && AuthorsCompatible(libationAuthor, absAuthors)
-			? DuplicateMatch.TitleAndAuthor
+		var lengths = CompareLengths(libationLengthInMinutes, absDurationSeconds);
+		if (lengths == LengthComparison.Different)
+			return DuplicateMatch.None;
+
+		var sameTitle = TitlesMatch(libationTitle, absTitle, absFullTitle);
+		if (sameTitle && AuthorsCompatible(libationAuthor, absAuthors))
+			return DuplicateMatch.TitleAndAuthor;
+
+		if (lengths != LengthComparison.Same)
+			return DuplicateMatch.None;
+
+		if (sameTitle)
+			return DuplicateMatch.TitleAndLength;
+
+		return TitleSimilarity(libationTitle, absTitle, absFullTitle) >= SimilarityThreshold && AuthorsSimilar(libationAuthor, absAuthors)
+			? DuplicateMatch.SimilarTitleAndLength
 			: DuplicateMatch.None;
+	}
+
+	internal enum LengthComparison
+	{
+		/// <summary>One side has no length.</summary>
+		Unknown,
+		/// <summary>Close enough to be the same recording.</summary>
+		Same,
+		/// <summary>Neither close enough to confirm a match nor far enough apart to rule one out.</summary>
+		Inconclusive,
+		/// <summary>Too far apart to be the same recording.</summary>
+		Different,
+	}
+
+	/// <summary>
+	/// Compares Audible's running time with the server's. Audible gives whole minutes and the liberated file
+	/// can lose its Audible intro and outro, so the same recording is allowed to be off by two minutes, or by
+	/// 1% for a long book. More than five minutes and 10% apart is a different recording.
+	/// </summary>
+	internal static LengthComparison CompareLengths(int? libationLengthInMinutes, double? absDurationSeconds)
+	{
+		if (libationLengthInMinutes is not > 0 || absDurationSeconds is not > 0)
+			return LengthComparison.Unknown;
+
+		var libationSeconds = libationLengthInMinutes.Value * 60d;
+		var difference = Math.Abs(libationSeconds - absDurationSeconds.Value);
+		var longer = Math.Max(libationSeconds, absDurationSeconds.Value);
+
+		if (difference <= Math.Max(120, longer * 0.01))
+			return LengthComparison.Same;
+		if (difference > Math.Max(300, longer * 0.10))
+			return LengthComparison.Different;
+		return LengthComparison.Inconclusive;
 	}
 
 	internal static bool AsinsMatch(string? libationAsin, string? absAsin)
@@ -521,6 +596,149 @@ public static class AudiobookshelfApiService
 			result = result[..open].TrimEnd();
 		}
 		return result;
+	}
+
+	/// <summary>How alike two titles or names must be, from 0 to 1, to count as the same one misspelled.</summary>
+	internal const double SimilarityThreshold = 0.85;
+
+	/// <summary>
+	/// How alike a server title is to Libation's "Title: Subtitle", from 0 (nothing in common) to 1 (the same).
+	/// Compares the same forms as <see cref="TitlesMatch"/> and returns the best score.
+	/// <para/>
+	/// Titles whose numbers differ score 0, so "Book 1" is never a misspelling of "Book 2".
+	/// </summary>
+	internal static double TitleSimilarity(string? libationTitle, string? absTitle, string? absFullTitle)
+	{
+		var full = NormalizeTitle(libationTitle);
+		var title = NormalizeTitle(absTitle);
+		if (string.IsNullOrWhiteSpace(full) || string.IsNullOrWhiteSpace(title))
+			return 0;
+
+		return Math.Max(
+			Math.Max(TitleSimilarity(title, full), TitleSimilarity(title, GetBaseTitle(full))),
+			TitleSimilarity(NormalizeTitle(absFullTitle), full));
+	}
+
+	private static double TitleSimilarity(string absTitle, string libationTitle)
+	{
+		var similarity = NumbersDiffer(absTitle, libationTitle) ? 0 : KeySimilarity(ComparisonKey(absTitle), ComparisonKey(libationTitle));
+
+		var absStripped = StripTrailingQualifiers(absTitle);
+		var libationStripped = StripTrailingQualifiers(libationTitle);
+
+		// As in SameTitle: a qualifier is only ignored when one side alone has one.
+		if (absStripped.Length != absTitle.Length && libationStripped.Length != libationTitle.Length)
+			return similarity;
+		if (NumbersDiffer(absStripped, libationStripped))
+			return similarity;
+
+		return Math.Max(similarity, KeySimilarity(ComparisonKey(absStripped), ComparisonKey(libationStripped)));
+	}
+
+	private static bool NumbersDiffer(string a, string b)
+		=> !NumbersIn(a).SequenceEqual(NumbersIn(b), StringComparer.Ordinal);
+
+	private static IEnumerable<string> NumbersIn(string value)
+	{
+		var start = -1;
+		for (var i = 0; i <= value.Length; i++)
+		{
+			var isDigit = i < value.Length && char.IsDigit(value[i]);
+			if (isDigit && start < 0)
+				start = i;
+			else if (!isDigit && start >= 0)
+			{
+				yield return value[start..i].TrimStart('0');
+				start = -1;
+			}
+		}
+	}
+
+	/// <summary>
+	/// Whether any author on the server is one of Libation's authors, allowing for a few wrong characters.
+	/// As with <see cref="AuthorsCompatible"/>, a side without authors does not rule a match out.
+	/// </summary>
+	internal static bool AuthorsSimilar(string? libationAuthor, IReadOnlyList<string>? absAuthors)
+	{
+		if (string.IsNullOrWhiteSpace(libationAuthor) || absAuthors == null || absAuthors.Count == 0)
+			return true;
+
+		var libationAuthors = libationAuthor.Split(',', StringSplitOptions.RemoveEmptyEntries)
+			.Select(ComparisonKey)
+			.Where(a => a.Length > 0)
+			.ToList();
+
+		if (libationAuthors.Count == 0)
+			return true;
+
+		return absAuthors.Select(ComparisonKey)
+			.Any(abs => libationAuthors.Any(libation => KeySimilarity(abs, libation) >= SimilarityThreshold));
+	}
+
+	/// <summary>
+	/// 1 minus the share of characters that must change to turn one key into the other. A change is one
+	/// character added, dropped or replaced, or two neighbours swapped ("Wlid" for "Wild").
+	/// </summary>
+	private static double KeySimilarity(string a, string b)
+	{
+		if (a.Length == 0 || b.Length == 0)
+			return 0;
+		if (a == b)
+			return 1;
+
+		// Optimal string alignment distance, keeping the last three rows.
+		var beforePrevious = new int[b.Length + 1];
+		var previous = new int[b.Length + 1];
+		var current = new int[b.Length + 1];
+		for (var j = 0; j <= b.Length; j++)
+			previous[j] = j;
+
+		for (var i = 1; i <= a.Length; i++)
+		{
+			current[0] = i;
+			for (var j = 1; j <= b.Length; j++)
+			{
+				var substitution = previous[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1);
+				current[j] = Math.Min(substitution, Math.Min(previous[j], current[j - 1]) + 1);
+
+				if (i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1])
+					current[j] = Math.Min(current[j], beforePrevious[j - 2] + 1);
+			}
+			(beforePrevious, previous, current) = (previous, current, beforePrevious);
+		}
+
+		return 1 - (double)previous[b.Length] / Math.Max(a.Length, b.Length);
+	}
+
+	/// <summary>
+	/// The longest words of a title, to search for one at a time. The server finds a query only as an exact
+	/// substring, so a title with a typo is found through a word the typo is not in.
+	/// </summary>
+	internal static IReadOnlyList<string> GetDistinctiveWords(string? title, int count = 2)
+	{
+		if (string.IsNullOrWhiteSpace(title))
+			return [];
+
+		var words = new List<string>();
+		var word = new StringBuilder();
+		foreach (var c in title + " ")
+		{
+			if (char.IsLetterOrDigit(c))
+				word.Append(c);
+			else
+			{
+				if (word.Length >= 4)
+					words.Add(word.ToString());
+				word.Clear();
+			}
+		}
+
+		return words
+			.Distinct(StringComparer.OrdinalIgnoreCase)
+			.Where(w => !string.Equals(w, title.Trim(), StringComparison.OrdinalIgnoreCase))
+			.OrderByDescending(w => w.Length)
+			.Take(count)
+			.ToList();
 	}
 
 	/// <summary>
@@ -600,14 +818,15 @@ public static class AudiobookshelfApiService
 		string? author,
 		string? series,
 		IEnumerable<string> filePaths,
-		string? asin = null)
+		string? asin = null,
+		int? lengthInMinutes = null)
 	{
 		apiToken = AudiobookshelfTokenStorage.DecryptToken(apiToken) ?? "";
 
 		// Pre-check for existing item
 		try
 		{
-			if (await BookExistsAsync(serverUrl, apiToken, libraryId, title, author, asin))
+			if (await BookExistsAsync(serverUrl, apiToken, libraryId, title, author, asin, lengthInMinutes))
 			{
 				Serilog.Log.Logger.Information("Skipping Audiobookshelf upload: book '{Title}' already exists in library {LibraryId}", title, libraryId);
 				return UploadResult.AlreadyExists;
