@@ -382,6 +382,21 @@ public partial class Configuration
 	[Description("Include PDFs when uploading to Audiobookshelf")]
 	public bool AudiobookshelfIncludePdfs { get => GetNonString(defaultValue: false); set => SetNonString(value); }
 
+	[Description("Duplicate check")]
+	public AudiobookshelfDuplicateMatching AudiobookshelfDuplicateMatch { get => GetNonString(defaultValue: AudiobookshelfDuplicateMatching.Loose); set => SetNonString(value); }
+
+	/// <summary>How much evidence the Audiobookshelf upload needs before it treats a book as already on the server.</summary>
+	[JsonConverter(typeof(StringEnumConverter))]
+	public enum AudiobookshelfDuplicateMatching
+	{
+		[Description("ASIN only")]
+		AsinOnly,
+		[Description("ASIN, or exact title and author")]
+		Normal,
+		[Description("ASIN, title and author, length, and near spellings")]
+		Loose,
+	}
+
 	[Description("Server URL (base address only)")]
 	public string? AudiobookshelfServerUrl { get => GetString(); set => SetString(value); }
 

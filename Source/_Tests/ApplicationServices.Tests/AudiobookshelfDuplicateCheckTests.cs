@@ -9,6 +9,8 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading.Tasks;
 
+using Matching = LibationFileManager.Configuration.AudiobookshelfDuplicateMatching;
+
 namespace ApplicationServices.Tests;
 
 [TestClass]
@@ -311,6 +313,7 @@ public class AudiobookshelfDuplicateCheckTests
 		object expected)
 	{
 		var match = AudiobookshelfApiService.ClassifyCandidate(
+			Matching.Loose,
 			libationTitle, libationAuthor, libationAsin, libationMinutes,
 			absTitle, absTitle, absAuthor is null ? [] : [absAuthor], absAsin, absSeconds);
 
@@ -368,8 +371,82 @@ public class AudiobookshelfDuplicateCheckTests
 		(await BookExistsAsync(server, "Dune", "Frank Herbert", "B0TEST0001")).Should().BeFalse();
 	}
 
-	private static Task<bool> BookExistsAsync(FakeAudiobookshelf server, string title, string author, string? asin, int? lengthInMinutes = null)
-		=> AudiobookshelfApiService.BookExistsAsync(server.Url, "test-token", "test-library-id", title, author, asin, lengthInMinutes);
+	[TestMethod]
+	// Server: title, author, ASIN, seconds. Libation is always "Wild Born" by Brandon Mull, B0TEST0001, 600 minutes.
+	// Same ASIN: a duplicate at every level.
+	[DataRow("Other", "Other", "B0TEST0001", 100d, Matching.AsinOnly, AudiobookshelfApiService.DuplicateMatch.Asin)]
+	[DataRow("Other", "Other", "B0TEST0001", 100d, Matching.Normal, AudiobookshelfApiService.DuplicateMatch.Asin)]
+	[DataRow("Other", "Other", "B0TEST0001", 100d, Matching.Loose, AudiobookshelfApiService.DuplicateMatch.Asin)]
+	// Different ASIN: never a duplicate.
+	[DataRow("Wild Born", "Brandon Mull", "B0TEST0002", 36000d, Matching.AsinOnly, AudiobookshelfApiService.DuplicateMatch.None)]
+	[DataRow("Wild Born", "Brandon Mull", "B0TEST0002", 36000d, Matching.Normal, AudiobookshelfApiService.DuplicateMatch.None)]
+	[DataRow("Wild Born", "Brandon Mull", "B0TEST0002", 36000d, Matching.Loose, AudiobookshelfApiService.DuplicateMatch.None)]
+	// No ASIN on the server, same title and author: not enough for ASIN only.
+	[DataRow("Wild Born", "Brandon Mull", null, 36000d, Matching.AsinOnly, AudiobookshelfApiService.DuplicateMatch.None)]
+	[DataRow("Wild Born", "Brandon Mull", null, 36000d, Matching.Normal, AudiobookshelfApiService.DuplicateMatch.TitleAndAuthor)]
+	[DataRow("Wild Born", "Brandon Mull", null, 36000d, Matching.Loose, AudiobookshelfApiService.DuplicateMatch.TitleAndAuthor)]
+	// Same title and author at half the length: Normal ignores length, Loose sees another edition.
+	[DataRow("Wild Born", "Brandon Mull", null, 18000d, Matching.Normal, AudiobookshelfApiService.DuplicateMatch.TitleAndAuthor)]
+	[DataRow("Wild Born", "Brandon Mull", null, 18000d, Matching.Loose, AudiobookshelfApiService.DuplicateMatch.None)]
+	// Same title, another author, same length: Loose only.
+	[DataRow("Wild Born", "Unknown", null, 36030d, Matching.Normal, AudiobookshelfApiService.DuplicateMatch.None)]
+	[DataRow("Wild Born", "Unknown", null, 36030d, Matching.Loose, AudiobookshelfApiService.DuplicateMatch.TitleAndLength)]
+	// Misspelled title and author, same length: Loose only.
+	[DataRow("Wlid Born", "Brandon Mul", null, 36030d, Matching.AsinOnly, AudiobookshelfApiService.DuplicateMatch.None)]
+	[DataRow("Wlid Born", "Brandon Mul", null, 36030d, Matching.Normal, AudiobookshelfApiService.DuplicateMatch.None)]
+	[DataRow("Wlid Born", "Brandon Mul", null, 36030d, Matching.Loose, AudiobookshelfApiService.DuplicateMatch.SimilarTitleAndLength)]
+	public void ClassifyCandidate_applies_only_the_rules_of_the_chosen_level(
+		string absTitle, string absAuthor, string? absAsin, double? absSeconds, object matching, object expected)
+	{
+		var match = AudiobookshelfApiService.ClassifyCandidate(
+			(Matching)matching,
+			"Wild Born", "Brandon Mull", "B0TEST0001", 600,
+			absTitle, absTitle, [absAuthor], absAsin, absSeconds);
+
+		Assert.AreEqual((AudiobookshelfApiService.DuplicateMatch)expected, match);
+	}
+
+	[TestMethod]
+	public async Task BookExistsAsync_asin_only_searches_for_the_asin_and_nothing_else()
+	{
+		using var server = FakeAudiobookshelf.Start(
+			new FakeItem("Wild Born", "Brandon Mull", DurationSeconds: 36000));
+
+		(await BookExistsAsync(server, "Wild Born", "Brandon Mull", "B0TEST0001", 600, Matching.AsinOnly)).Should().BeFalse();
+		string.Join("|", server.Queries).Should().Be("B0TEST0001");
+	}
+
+	[TestMethod]
+	public async Task BookExistsAsync_asin_only_finds_a_book_with_the_same_asin()
+	{
+		using var server = FakeAudiobookshelf.Start(
+			new FakeItem("Le Petit Prince", "Antoine de Saint-Exup\u00E9ry", Asin: "B0TEST0001"));
+
+		(await BookExistsAsync(server, "The Little Prince", "Somebody Else", "B0TEST0001", 600, Matching.AsinOnly)).Should().BeTrue();
+	}
+
+	[TestMethod]
+	public async Task BookExistsAsync_asin_only_without_an_asin_uploads_without_searching()
+	{
+		using var server = FakeAudiobookshelf.Start(
+			new FakeItem("Wild Born", "Brandon Mull"));
+
+		(await BookExistsAsync(server, "Wild Born", "Brandon Mull", asin: null, 600, Matching.AsinOnly)).Should().BeFalse();
+		server.Queries.Should().HaveCount(0);
+	}
+
+	[TestMethod]
+	public async Task BookExistsAsync_normal_does_not_search_by_word()
+	{
+		using var server = FakeAudiobookshelf.Start(
+			new FakeItem("Wlid Born", "Brandon Mull", DurationSeconds: 36030));
+
+		(await BookExistsAsync(server, "Wild Born", "Brandon Mull", "B0TEST0001", 600, Matching.Normal)).Should().BeFalse();
+		string.Join("|", server.Queries).Should().Be("B0TEST0001|Wild Born");
+	}
+
+	private static Task<bool> BookExistsAsync(FakeAudiobookshelf server, string title, string author, string? asin, int? lengthInMinutes = null, Matching matching = Matching.Loose)
+		=> AudiobookshelfApiService.BookExistsAsync(server.Url, "test-token", "test-library-id", title, author, asin, lengthInMinutes, matching);
 
 	private sealed record FakeItem(string Title, string Author, string? Subtitle = null, string? Asin = null, string? FileName = null, double? DurationSeconds = null);
 

@@ -2,6 +2,7 @@ using ApplicationServices;
 using AudibleApi.Authorization;
 using AudibleUtilities;
 using LibationFileManager;
+using LibationUiBase;
 using ReactiveUI;
 using System;
 using System.Collections.Generic;
@@ -17,6 +18,7 @@ public class AudiobookshelfSettingsVM : ViewModelBase
 	private readonly Configuration config;
 	private bool enabled;
 	private bool includePdfs;
+	private EnumDisplay<Configuration.AudiobookshelfDuplicateMatching> duplicateMatch;
 	private string serverUrl = "";
 	private string apiToken = "";
 	private string statusText = "";
@@ -34,6 +36,7 @@ public class AudiobookshelfSettingsVM : ViewModelBase
 		this.config = config;
 		enabled = config.AudiobookshelfEnabled;
 		includePdfs = config.AudiobookshelfIncludePdfs;
+		duplicateMatch = DuplicateMatchOptions.First(o => o.Value == config.AudiobookshelfDuplicateMatch);
 		serverUrl = config.AudiobookshelfServerUrl ?? "";
 		apiToken = AudiobookshelfTokenStorage.DecryptToken(config.AudiobookshelfApiToken) ?? "";
 
@@ -59,6 +62,12 @@ public class AudiobookshelfSettingsVM : ViewModelBase
 	{
 		get => includePdfs;
 		set => this.RaiseAndSetIfChanged(ref includePdfs, value);
+	}
+
+	public EnumDisplay<Configuration.AudiobookshelfDuplicateMatching> DuplicateMatch
+	{
+		get => duplicateMatch;
+		set => this.RaiseAndSetIfChanged(ref duplicateMatch, value);
 	}
 
 	public string ServerUrl
@@ -146,6 +155,11 @@ public class AudiobookshelfSettingsVM : ViewModelBase
 	// Labels from Configuration descriptions
 	public string EnabledText { get; } = Configuration.GetDescription(nameof(Configuration.AudiobookshelfEnabled));
 	public string IncludePdfsText { get; } = Configuration.GetDescription(nameof(Configuration.AudiobookshelfIncludePdfs));
+	public string DuplicateMatchText { get; } = Configuration.GetDescription(nameof(Configuration.AudiobookshelfDuplicateMatch));
+	public EnumDisplay<Configuration.AudiobookshelfDuplicateMatching>[] DuplicateMatchOptions { get; } =
+		Enum.GetValues<Configuration.AudiobookshelfDuplicateMatching>()
+		.Select(v => new EnumDisplay<Configuration.AudiobookshelfDuplicateMatching>(v))
+		.ToArray();
 	public string ServerUrlText { get; } = Configuration.GetDescription(nameof(Configuration.AudiobookshelfServerUrl));
 	public string ApiTokenText { get; } = Configuration.GetDescription(nameof(Configuration.AudiobookshelfApiToken));
 	public string LibraryText { get; } = Configuration.GetDescription(nameof(Configuration.AudiobookshelfLibraryId));
@@ -234,6 +248,7 @@ public class AudiobookshelfSettingsVM : ViewModelBase
 	{
 		config.AudiobookshelfEnabled = Enabled;
 		config.AudiobookshelfIncludePdfs = IncludePdfs;
+		config.AudiobookshelfDuplicateMatch = DuplicateMatch.Value;
 		config.AudiobookshelfServerUrl = AudiobookshelfApiService.TryNormalizeServerUrlForSave(ServerUrl);
 		ServerUrl = config.AudiobookshelfServerUrl ?? "";
 		config.AudiobookshelfApiToken = AudiobookshelfTokenStorage.EncryptToken(ApiToken.Trim());

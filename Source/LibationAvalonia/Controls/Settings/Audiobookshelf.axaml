@@ -17,6 +17,15 @@
 				  IsEnabled="{Binding Enabled}"
 				  Margin="0,0,0,10" />
 
+		<StackPanel Orientation="Horizontal" Spacing="10" Margin="0,0,0,10">
+			<TextBlock Text="{Binding DuplicateMatchText}"
+					   VerticalAlignment="Center" />
+			<ComboBox ItemsSource="{Binding DuplicateMatchOptions}"
+					  SelectedItem="{Binding DuplicateMatch, Mode=TwoWay}"
+					  IsEnabled="{Binding Enabled}"
+					  MinWidth="320" />
+		</StackPanel>
+
 		<Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto">
 			<!-- Server URL -->
 			<TextBlock Grid.Row="0" Grid.Column="0"

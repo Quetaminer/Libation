@@ -9,6 +9,7 @@ Available in Classic (WinForms), Chardonnay (Avalonia), and the CLI `liberate` c
 1. Open **Settings** -> **Audiobookshelf**.
 2. Enable **Automatically upload downloaded books**.
 3. Optionally enable **Include PDFs when uploading to Audiobookshelf** (off by default).
+   Optionally choose how strict the **Duplicate check** is (see [How strict the check is](#how-strict-the-check-is)).
 4. Enter your Audiobookshelf **Server URL** and **API Token** (see below).
 5. Click **Connect / Refresh**. Libation loads your book libraries and folders.
 6. Choose the target **Library** and **Folder**, then save settings.
@@ -95,7 +96,7 @@ The command:
 - Checks the server before each upload and skips titles already present - see [Duplicate handling](#duplicate-handling).
 - Prints a summary at the end: uploaded, already on server, no files found, failed, skipped. `skipped` counts books you named by ASIN that were not eligible - most often because they are not marked as liberated.
 
-Libation does not record which books it has already uploaded, so every run re-checks each candidate against the server. That costs one search request for a book the server already has under its ASIN, and up to five for a book it does not have, which is noticeable on a large library but makes repeat runs safe to retry.
+Libation does not record which books it has already uploaded, so every run re-checks each candidate against the server. That costs one search request for a book the server already has under its ASIN, and up to five for a book it does not have (one with **ASIN only**, three with **ASIN, or exact title and author**), which is noticeable on a large library but makes repeat runs safe to retry.
 
 ## Duplicate handling
 
@@ -109,6 +110,24 @@ Before uploading, Libation searches the target Audiobookshelf library for the bo
 Audiobookshelf's search only finds exact text, so to find a misspelled title Libation also searches for the title's two longest words. A title with a typo in every one of those words is not found.
 
 If Audiobookshelf reports that the destination already exists, Libation also skips the upload and continues.
+
+### How strict the check is
+
+**Settings** -> **Audiobookshelf** -> **Duplicate check** chooses which of the rules above apply. It affects uploads from both the GUI and the CLI.
+
+| Setting | Skips the upload when the server has | Rules used |
+| --- | --- | --- |
+| **ASIN only** | an item with the book's ASIN. Anything else is uploaded, including a book with no ASIN in Libation. | 1 |
+| **ASIN, or exact title and author** | an item with the book's ASIN, or, when the item has no ASIN, the same title and author. Length is not checked. | 1, 3 |
+| **ASIN, title and author, length, and near spellings** (default) | any of the above, with length used to tell editions apart and near spellings accepted when the lengths agree. | 1 to 4 |
+
+Use **ASIN only** if your Audiobookshelf items all carry ASINs and you would rather get the odd duplicate than miss an upload. Use the default if many of your items have no ASIN or were named by hand.
+
+For one CLI run, override it with `AsinOnly`, `Normal` or `Loose`:
+
+```console
+libationcli abs upload -o AudiobookshelfDuplicateMatch=AsinOnly
+```
 
 ## Failures do not fail liberation
 

@@ -83,7 +83,8 @@ public class UploadToAudiobookshelf : Processable, IProcessable<UploadToAudioboo
 				series,
 				files,
 				libraryBook.Book.AudibleProductId,
-				libraryBook.Book.LengthInMinutes);
+				libraryBook.Book.LengthInMinutes,
+				Configuration.AudiobookshelfDuplicateMatch);
 
 			if (result == AudiobookshelfApiService.UploadResult.Success)
 			{

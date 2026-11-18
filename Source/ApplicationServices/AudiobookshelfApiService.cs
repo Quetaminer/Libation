@@ -1,3 +1,4 @@
+using LibationFileManager;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
@@ -302,14 +303,18 @@ public static class AudiobookshelfApiService
 	/// Whether the library already holds this book.
 	/// <para/>
 	/// Candidates come from Audiobookshelf's library search, which finds its query as a substring of an
-	/// item's title, subtitle, ASIN or ISBN. The search is asked for the ASIN, then for the title with and
-	/// without its subtitle, and last for the title's longest words, which still finds an item whose title
-	/// has a typo elsewhere. <see cref="ClassifyCandidate"/> decides whether a candidate is the same book.
+	/// item's title, subtitle, ASIN or ISBN. The search is asked for the ASIN; then, unless
+	/// <paramref name="matching"/> is <see cref="Configuration.AudiobookshelfDuplicateMatching.AsinOnly"/>, for the
+	/// title with and without its subtitle; and last, when <paramref name="matching"/> is
+	/// <see cref="Configuration.AudiobookshelfDuplicateMatching.Loose"/>, for the title's longest words, which still
+	/// finds an item whose title has a typo elsewhere. <see cref="ClassifyCandidate"/> decides whether a
+	/// candidate is the same book.
 	/// <para/>
 	/// Audiobookshelf fills an item's ASIN from the audio file's tags or from an <c>[ASIN]</c> in the folder
 	/// name. An ASIN that appears only in a file name is not in the item's metadata and is not matched as one.
 	/// </summary>
-	public static async Task<bool> BookExistsAsync(string serverUrl, string apiToken, string libraryId, string title, string? author = null, string? asin = null, int? lengthInMinutes = null)
+	public static async Task<bool> BookExistsAsync(string serverUrl, string apiToken, string libraryId, string title, string? author = null, string? asin = null, int? lengthInMinutes = null,
+		Configuration.AudiobookshelfDuplicateMatching matching = Configuration.AudiobookshelfDuplicateMatching.Loose)
 	{
 		apiToken = AudiobookshelfTokenStorage.DecryptToken(apiToken) ?? "";
 		using var client = CreateClient(serverUrl);
@@ -319,7 +324,7 @@ public static class AudiobookshelfApiService
 		var normalizedTitle = NormalizeTitle(title);
 		var baseTitle = GetBaseTitle(normalizedTitle);
 
-		Serilog.Log.Logger.Debug("Audiobookshelf duplicate check: looking for '{Title}' (base: '{BaseTitle}') in library {LibraryId}", normalizedTitle, baseTitle, libraryId);
+		Serilog.Log.Logger.Debug("Audiobookshelf duplicate check: looking for '{Title}' (base: '{BaseTitle}') in library {LibraryId}, matching {Matching}", normalizedTitle, baseTitle, libraryId, matching);
 
 		var seen = new HashSet<string>(StringComparer.Ordinal);
 
@@ -332,6 +337,7 @@ public static class AudiobookshelfApiService
 					continue;
 
 				var match = ClassifyCandidate(
+					matching,
 					normalizedTitle, author, asin, lengthInMinutes,
 					candidate.Title, candidate.FullTitle, candidate.Authors, candidate.Asin, candidate.DurationSeconds);
 
@@ -352,6 +358,12 @@ public static class AudiobookshelfApiService
 			if (!string.IsNullOrWhiteSpace(asin) && await SearchFindsBookAsync(asin.Trim(), 10))
 				return true;
 
+			if (matching == Configuration.AudiobookshelfDuplicateMatching.AsinOnly)
+			{
+				Serilog.Log.Logger.Debug("Audiobookshelf duplicate check: no item with ASIN {Asin} in library {LibraryId}", asin, libraryId);
+				return false;
+			}
+
 			// Search with base title first (shorter = broader matches, better recall)
 			if (await SearchFindsBookAsync(baseTitle, 20))
 				return true;
@@ -361,7 +373,7 @@ public static class AudiobookshelfApiService
 				return true;
 
 			// A misspelled title is only accepted when the lengths agree, so without a length there is nothing more to find.
-			if (lengthInMinutes is > 0)
+			if (matching == Configuration.AudiobookshelfDuplicateMatching.Loose && lengthInMinutes is > 0)
 			{
 				foreach (var word in GetDistinctiveWords(baseTitle))
 				{
@@ -457,8 +469,13 @@ public static class AudiobookshelfApiService
 	/// 4) Title, author and length together. When the lengths agree, the author may differ if the title is the
 	/// same, and both may be off by a few characters. See <see cref="TitleSimilarity"/> and
 	/// <see cref="AuthorsSimilar"/>. Without a matching length, a near miss stays a different book.
+	/// <para/>
+	/// <paramref name="matching"/> limits which of these apply: <see cref="Configuration.AudiobookshelfDuplicateMatching.AsinOnly"/>
+	/// uses only 1, <see cref="Configuration.AudiobookshelfDuplicateMatching.Normal"/> uses 1 and 3, and
+	/// <see cref="Configuration.AudiobookshelfDuplicateMatching.Loose"/> uses all four.
 	/// </summary>
 	internal static DuplicateMatch ClassifyCandidate(
+		Configuration.AudiobookshelfDuplicateMatching matching,
 		string? libationTitle,
 		string? libationAuthor,
 		string? libationAsin,
@@ -471,8 +488,15 @@ public static class AudiobookshelfApiService
 	{
 		if (AsinsMatch(libationAsin, absAsin))
 			return DuplicateMatch.Asin;
-		if (AsinsDiffer(libationAsin, absAsin))
+		if (AsinsDiffer(libationAsin, absAsin) || matching == Configuration.AudiobookshelfDuplicateMatching.AsinOnly)
 			return DuplicateMatch.None;
+
+		if (matching == Configuration.AudiobookshelfDuplicateMatching.Normal)
+		{
+			return TitlesMatch(libationTitle, absTitle, absFullTitle) && AuthorsCompatible(libationAuthor, absAuthors)
+				? DuplicateMatch.TitleAndAuthor
+				: DuplicateMatch.None;
+		}
 
 		var lengths = CompareLengths(libationLengthInMinutes, absDurationSeconds);
 		if (lengths == LengthComparison.Different)
@@ -819,14 +843,15 @@ public static class AudiobookshelfApiService
 		string? series,
 		IEnumerable<string> filePaths,
 		string? asin = null,
-		int? lengthInMinutes = null)
+		int? lengthInMinutes = null,
+		Configuration.AudiobookshelfDuplicateMatching matching = Configuration.AudiobookshelfDuplicateMatching.Loose)
 	{
 		apiToken = AudiobookshelfTokenStorage.DecryptToken(apiToken) ?? "";
 
 		// Pre-check for existing item
 		try
 		{
-			if (await BookExistsAsync(serverUrl, apiToken, libraryId, title, author, asin, lengthInMinutes))
+			if (await BookExistsAsync(serverUrl, apiToken, libraryId, title, author, asin, lengthInMinutes, matching))
 			{
 				Serilog.Log.Logger.Information("Skipping Audiobookshelf upload: book '{Title}' already exists in library {LibraryId}", title, libraryId);
 				return UploadResult.AlreadyExists;

@@ -2,6 +2,7 @@ using ApplicationServices;
 using AudibleApi.Authorization;
 using AudibleUtilities;
 using LibationFileManager;
+using LibationUiBase;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -18,6 +19,12 @@ public partial class SettingsDialog
 	{
 		absEnabledCb.Text = desc(nameof(config.AudiobookshelfEnabled));
 		absIncludePdfsCb.Text = desc(nameof(config.AudiobookshelfIncludePdfs));
+		absDuplicateMatchLbl.Text = desc(nameof(config.AudiobookshelfDuplicateMatch));
+		absDuplicateMatchCb.Items.Clear();
+		absDuplicateMatchCb.Items.AddRange(
+			Enum.GetValues<Configuration.AudiobookshelfDuplicateMatching>()
+			.Select(v => new EnumDisplay<Configuration.AudiobookshelfDuplicateMatching>(v))
+			.ToArray());
 		absUrlLbl.Text = desc(nameof(config.AudiobookshelfServerUrl));
 		absTokenLbl.Text = desc(nameof(config.AudiobookshelfApiToken));
 		absLibraryLbl.Text = desc(nameof(config.AudiobookshelfLibraryId));
@@ -27,6 +34,9 @@ public partial class SettingsDialog
 
 		absEnabledCb.Checked = config.AudiobookshelfEnabled;
 		absIncludePdfsCb.Checked = config.AudiobookshelfIncludePdfs;
+		absDuplicateMatchCb.SelectedItem = absDuplicateMatchCb.Items
+			.OfType<EnumDisplay<Configuration.AudiobookshelfDuplicateMatching>>()
+			.FirstOrDefault(d => d.Value == config.AudiobookshelfDuplicateMatch);
 		absUrlTb.Text = config.AudiobookshelfServerUrl ?? "";
 		absTokenTb.Text = AudiobookshelfTokenStorage.DecryptToken(config.AudiobookshelfApiToken) ?? "";
 		absTokenTb.PasswordChar = '*';
@@ -45,6 +55,7 @@ public partial class SettingsDialog
 	private void ToggleAudiobookshelfControls(bool enabled)
 	{
 		absIncludePdfsCb.Enabled = enabled;
+		absDuplicateMatchCb.Enabled = enabled;
 		absUrlTb.Enabled = enabled;
 		absTokenTb.Enabled = enabled;
 		absConnectBtn.Enabled = enabled;
@@ -141,6 +152,7 @@ public partial class SettingsDialog
 	{
 		config.AudiobookshelfEnabled = absEnabledCb.Checked;
 		config.AudiobookshelfIncludePdfs = absIncludePdfsCb.Checked;
+		config.AudiobookshelfDuplicateMatch = (absDuplicateMatchCb.SelectedItem as EnumDisplay<Configuration.AudiobookshelfDuplicateMatching>)?.Value ?? config.AudiobookshelfDuplicateMatch;
 		config.AudiobookshelfServerUrl = AudiobookshelfApiService.TryNormalizeServerUrlForSave(absUrlTb.Text);
 		absUrlTb.Text = config.AudiobookshelfServerUrl ?? "";
 		config.AudiobookshelfApiToken = AudiobookshelfTokenStorage.EncryptToken(absTokenTb.Text.Trim());

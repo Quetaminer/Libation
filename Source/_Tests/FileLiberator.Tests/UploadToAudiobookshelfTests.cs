@@ -282,6 +282,18 @@ public class UploadToAudiobookshelfTests
 	}
 
 	[TestMethod]
+	public void Duplicate_match_setting_defaults_to_loose_and_round_trips()
+	{
+		var config = ConfiguredForAudiobookshelf();
+		Assert.AreEqual(Configuration.AudiobookshelfDuplicateMatching.Loose, config.AudiobookshelfDuplicateMatch);
+		foreach (var matching in Enum.GetValues<Configuration.AudiobookshelfDuplicateMatching>())
+		{
+			config.AudiobookshelfDuplicateMatch = matching;
+			Assert.AreEqual(matching, config.CreateEphemeralCopy().AudiobookshelfDuplicateMatch);
+		}
+	}
+
+	[TestMethod]
 	public void BuildUploadFileList_appends_distinct_pdfs_after_cover_and_excludes_zip()
 	{
 		var files = UploadToAudiobookshelf.BuildUploadFileList(

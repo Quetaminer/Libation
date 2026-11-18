@@ -162,6 +162,8 @@ namespace LibationWinForms.Dialogs
 			tab5Audiobookshelf = new System.Windows.Forms.TabPage();
 			absEnabledCb = new System.Windows.Forms.CheckBox();
 			absIncludePdfsCb = new System.Windows.Forms.CheckBox();
+			absDuplicateMatchLbl = new System.Windows.Forms.Label();
+			absDuplicateMatchCb = new System.Windows.Forms.ComboBox();
 			absPlaintextWarningLbl = new System.Windows.Forms.Label();
 			absUrlLbl = new System.Windows.Forms.Label();
 			absUrlTb = new System.Windows.Forms.TextBox();
@@ -1692,6 +1694,8 @@ namespace LibationWinForms.Dialogs
 			tab5Audiobookshelf.BackColor = System.Drawing.SystemColors.Window;
 			tab5Audiobookshelf.Controls.Add(absEnabledCb);
 			tab5Audiobookshelf.Controls.Add(absIncludePdfsCb);
+			tab5Audiobookshelf.Controls.Add(absDuplicateMatchLbl);
+			tab5Audiobookshelf.Controls.Add(absDuplicateMatchCb);
 			tab5Audiobookshelf.Controls.Add(absPlaintextWarningLbl);
 			tab5Audiobookshelf.Controls.Add(absUrlLbl);
 			tab5Audiobookshelf.Controls.Add(absUrlTb);
@@ -1730,6 +1734,24 @@ namespace LibationWinForms.Dialogs
 			absIncludePdfsCb.TabIndex = 1;
 			absIncludePdfsCb.Text = "[AudiobookshelfIncludePdfs desc]";
 			absIncludePdfsCb.UseVisualStyleBackColor = true;
+			// 
+			// absDuplicateMatchLbl
+			// 
+			absDuplicateMatchLbl.AutoSize = true;
+			absDuplicateMatchLbl.Location = new System.Drawing.Point(250, 33);
+			absDuplicateMatchLbl.Name = "absDuplicateMatchLbl";
+			absDuplicateMatchLbl.Size = new System.Drawing.Size(92, 15);
+			absDuplicateMatchLbl.TabIndex = 13;
+			absDuplicateMatchLbl.Text = "[AudiobookshelfDuplicateMatch desc]";
+			// 
+			// absDuplicateMatchCb
+			// 
+			absDuplicateMatchCb.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
+			absDuplicateMatchCb.FormattingEnabled = true;
+			absDuplicateMatchCb.Location = new System.Drawing.Point(350, 29);
+			absDuplicateMatchCb.Name = "absDuplicateMatchCb";
+			absDuplicateMatchCb.Size = new System.Drawing.Size(320, 23);
+			absDuplicateMatchCb.TabIndex = 14;
 			// 
 			// absPlaintextWarningLbl
 			// 
@@ -2030,6 +2052,8 @@ namespace LibationWinForms.Dialogs
 		private System.Windows.Forms.TabPage tab5Audiobookshelf;
 		private System.Windows.Forms.CheckBox absEnabledCb;
 		private System.Windows.Forms.CheckBox absIncludePdfsCb;
+		private System.Windows.Forms.Label absDuplicateMatchLbl;
+		private System.Windows.Forms.ComboBox absDuplicateMatchCb;
 		private System.Windows.Forms.Label absPlaintextWarningLbl;
 		private System.Windows.Forms.Label absUrlLbl;
 		private System.Windows.Forms.TextBox absUrlTb;
